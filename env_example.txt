@@ -1,0 +1,46 @@
+# Database Configuration
+DATABASE_URL="postgresql://localhost/bookdb"
+REDIS_HOST="localhost"
+REDIS_PORT=6379
+REDIS_PASSWORD=""
+
+# Contextual Bandit Parameters
+BANDIT_ALPHA=1.0
+FEATURE_DIM=50
+REGULARIZATION=1.0
+EXPLORATION_RATE=0.1
+DECAY_RATE=0.99
+MIN_OBSERVATIONS=10
+
+# Model Paths (optional)
+# CONTENT_MODEL_PATH="models/content_model.pkl"
+# COLLABORATIVE_MODEL_PATH="models/collaborative_model.pkl"
+
+# Recommendation Settings
+MIN_INTERACTIONS_FOR_BANDIT=5
+MIN_INTERACTIONS_FOR_HYBRID=2
+
+# Cache Settings
+CACHE_TTL=300
+
+# API Settings
+API_HOST="0.0.0.0"
+API_PORT=8000
+DEBUG=false
+LOG_LEVEL="INFO"
+
+# Security
+SECRET_KEY="your-secret-key-here-change-this-in-production"
+ALGORITHM="HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+
+# Performance Settings
+MAX_RECOMMENDATIONS=20
+BATCH_SIZE=100
+
+# Monitoring
+ENABLE_METRICS=true
+METRICS_INTERVAL=60
+
+# Environment
+ENVIRONMENT="development" 
