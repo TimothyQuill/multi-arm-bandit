@@ -39,6 +39,8 @@ class DiversityConfig:
     use_similarity_penalty: bool = True  # Penalize similar arms
     use_temporal_diversity: bool = True  # Consider temporal diversity
     temporal_window_hours: int = 24  # Window for temporal diversity
+    feature_staleness_hours: int = 24  # Hours after which features are considered stale
+    auto_refresh_features: bool = True  # Automatically refresh stale features
 
 
 @dataclass
@@ -115,6 +117,7 @@ class ContextualBandit:
         
         # Diversity and exploration tracking
         self.arm_feature_cache = {}  # Cache of arm features for diversity calculations
+        self.arm_feature_timestamps = {}  # Timestamps when features were last updated
         self.diversity_clusters = {}  # Clustering information for arms
         self.arm_similarity_matrix = {}  # Precomputed similarity matrix
         self.recent_selections = deque(maxlen=100)  # Recent arm selections for temporal diversity
@@ -151,14 +154,103 @@ class ContextualBandit:
             
             # Initialize diversity tracking
             self.arm_feature_cache[arm_id] = initial_features if initial_features is not None else np.zeros(self.config.feature_dim)
+            self.arm_feature_timestamps[arm_id] = datetime.now()
             self.diversity_scores[arm_id] = 1.0  # Start with maximum diversity
             
             logger.info(f"Added new arm: {arm_id}")
+        else:
+            # Update existing arm features if provided
+            if initial_features is not None:
+                self.update_arm_features(arm_id, initial_features)
     
     def add_candidate_pool(self, candidate_arm_ids: List[str]):
         """Add arms to the candidate pool for potential refreshment."""
         self.candidate_pool.update(candidate_arm_ids)
         logger.info(f"Added {len(candidate_arm_ids)} arms to candidate pool. Total pool size: {len(self.candidate_pool)}")
+    
+    def update_arm_features(self, arm_id: str, new_features: np.ndarray):
+        """
+        Update the cached features for an arm.
+        
+        Args:
+            arm_id: Arm identifier
+            new_features: New feature vector
+        """
+        if arm_id in self.arms:
+            # Update the arm's features
+            self.arms[arm_id]['features'] = new_features
+            
+            # Update the feature cache for diversity calculations
+            self.arm_feature_cache[arm_id] = new_features.copy()
+            
+            # Update timestamp
+            self.arm_feature_timestamps[arm_id] = datetime.now()
+            
+            # Invalidate clustering for this arm since features changed
+            if arm_id in self.diversity_clusters:
+                del self.diversity_clusters[arm_id]
+            
+            # Reset diversity score to encourage re-evaluation
+            self.diversity_scores[arm_id] = 1.0
+            
+            logger.info(f"Updated features for arm {arm_id}")
+        else:
+            logger.warning(f"Cannot update features for non-existent arm: {arm_id}")
+    
+    def _are_features_stale(self, arm_id: str) -> bool:
+        """
+        Check if an arm's features are stale and need refreshing.
+        
+        Args:
+            arm_id: Arm identifier
+            
+        Returns:
+            True if features are stale
+        """
+        if arm_id not in self.arm_feature_timestamps:
+            return True
+        
+        hours_since_update = (datetime.now() - self.arm_feature_timestamps[arm_id]).total_seconds() / 3600
+        return hours_since_update > self.config.diversity.feature_staleness_hours
+    
+    def _refresh_stale_features(self, arm_ids: List[str], user_context: Dict[str, Any], 
+                               session_context: Dict[str, Any]):
+        """
+        Refresh stale features for a list of arms.
+        
+        Args:
+            arm_ids: List of arm IDs to check and refresh
+            user_context: User context
+            session_context: Session context
+        """
+        for arm_id in arm_ids:
+            if self._are_features_stale(arm_id):
+                # For now, we'll just update the timestamp to avoid infinite loops
+                # In a real implementation, you'd want to fetch fresh metadata
+                self.arm_feature_timestamps[arm_id] = datetime.now()
+                logger.info(f"Marked features as refreshed for arm {arm_id}")
+    
+    def refresh_arm_features(self, arm_id: str, user_context: Dict[str, Any], 
+                           session_context: Dict[str, Any], book_features: Dict[str, Any]):
+        """
+        Refresh arm features by re-extracting them from current context and book metadata.
+        
+        Args:
+            arm_id: Arm identifier
+            user_context: User context
+            session_context: Session context
+            book_features: Updated book features
+        """
+        if arm_id in self.arms:
+            # Extract fresh features
+            new_features = self.extract_features(user_context, session_context, book_features)
+            
+            # Update the cached features
+            self.update_arm_features(arm_id, new_features)
+            
+            logger.info(f"Refreshed features for arm {arm_id}")
+        else:
+            logger.warning(f"Cannot refresh features for non-existent arm: {arm_id}")
     
     def _compute_arm_similarities(self, arm_ids: List[str], context_features: np.ndarray) -> Dict[str, float]:
         """
@@ -885,9 +977,15 @@ class ContextualBandit:
         
         arm_scores = []
         
+        # Check for stale features if auto-refresh is enabled
+        if self.config.diversity.auto_refresh_features:
+            self._refresh_stale_features(active_available_books, user_context, session_context)
+        
         for arm_id in active_available_books:
-            # Extract features for this specific book
+            # Get current features for this specific book
             book_features = self.arms[arm_id]['features']
+            
+            # Extract context features (this combines user, session, and book features)
             context_features = self.extract_features(user_context, session_context, book_features)
             
             # Calculate UCB score using both individual and global weights
@@ -1155,6 +1253,7 @@ class ContextualBandit:
             'arm_confidence_history': {k: list(v) for k, v in self.arm_confidence_history.items()},
             # Diversity state
             'arm_feature_cache': {k: v.tolist() for k, v in self.arm_feature_cache.items()},
+            'arm_feature_timestamps': {k: v.isoformat() for k, v in self.arm_feature_timestamps.items()},
             'diversity_clusters': dict(self.diversity_clusters),
             'diversity_scores': dict(self.diversity_scores),
             'recent_selections': [(arm_id, score) for arm_id, score in self.recent_selections],
@@ -1206,6 +1305,8 @@ class ContextualBandit:
         
         # Load diversity state
         self.arm_feature_cache = {k: np.array(v) for k, v in model_data.get('arm_feature_cache', {}).items()}
+        self.arm_feature_timestamps = {k: datetime.fromisoformat(v) 
+                                      for k, v in model_data.get('arm_feature_timestamps', {}).items()}
         self.diversity_clusters = model_data.get('diversity_clusters', {})
         self.diversity_scores = defaultdict(float, model_data.get('diversity_scores', {}))
         self.recent_selections = deque(model_data.get('recent_selections', []), maxlen=100)
@@ -1241,6 +1342,32 @@ class BookRecommenderBandit:
         # Extract features from metadata
         features = self._extract_book_features(metadata)
         self.bandit.add_arm(book_id, features)
+    
+    def update_book_metadata(self, book_id: str, updated_metadata: Dict[str, Any]):
+        """Update book metadata and refresh features."""
+        if book_id in self.book_metadata:
+            # Update metadata
+            self.book_metadata[book_id].update(updated_metadata)
+            
+            # Extract new features from updated metadata
+            new_features = self._extract_book_features(self.book_metadata[book_id])
+            
+            # Update the bandit's feature cache
+            self.bandit.update_arm_features(book_id, new_features)
+            
+            logger.info(f"Updated metadata and features for book {book_id}")
+        else:
+            logger.warning(f"Cannot update metadata for non-existent book: {book_id}")
+    
+    def refresh_book_features(self, book_id: str, user_context: Dict[str, Any], 
+                            session_context: Dict[str, Any]):
+        """Refresh book features using current context and metadata."""
+        if book_id in self.book_metadata:
+            # Use current metadata to refresh features
+            book_features = self._extract_book_features(self.book_metadata[book_id])
+            self.bandit.refresh_arm_features(book_id, user_context, session_context, book_features)
+        else:
+            logger.warning(f"Cannot refresh features for non-existent book: {book_id}")
     
     def add_candidate_books(self, book_ids: List[str]):
         """Add books to the candidate pool for potential refreshment."""
