@@ -1158,36 +1158,24 @@ class BookRecommenderBandit:
         """
         features = []
         
-        # User features (normalized)
+        # Simplified user features (only essential variables)
         user_features = [
-            user_context.get('age', 25) / 100.0,  # Normalized age
-            user_context.get('preference_fiction', 0.5),
-            user_context.get('preference_nonfiction', 0.5),
-            user_context.get('preference_mystery', 0.5),
-            user_context.get('preference_romance', 0.5),
-            user_context.get('preference_scifi', 0.5),
-            user_context.get('avg_reading_time', 30) / 120.0,  # Normalized reading time
-            user_context.get('borrow_frequency', 2) / 10.0,  # Normalized frequency
+            user_context.get('age', 25) / 100.0,  # Normalized age (0-1)
         ]
         features.extend(user_features)
         
-        # Categorical user features using utility functions
+        # Categorical user features (simplified to only essential variables)
         # Gender encoding
         gender = user_context.get('gender', 'unknown')
         gender_features = encode_categorical_feature(gender, 'gender')
         features.extend(gender_features)
         
-        # Library branch encoding (replaces postcode)
+        # Library branch encoding
         library_branch = user_context.get('library_branch', 'unknown')
         branch_features = encode_library_branch(library_branch)
         features.extend(branch_features)
         
-        # Education level
-        education_level = user_context.get('education_level', 'unknown')
-        education_features = encode_categorical_feature(education_level, 'education_level')
-        features.extend(education_features)
-        
-        # Occupation category
+        # Occupation category (simplified, no separate education)
         occupation = user_context.get('occupation_category', 'unknown')
         occupation_features = encode_categorical_feature(occupation, 'occupation_category')
         features.extend(occupation_features)
@@ -1220,19 +1208,9 @@ class BookRecommenderBandit:
         genre_features = encode_categorical_feature(book_genre, 'genre')
         features.extend(genre_features)
         
-        # Interaction history features
-        user_id = user_context.get('user_id', 'unknown')
-        if user_id in self.bandit.user_history:
-            recent_interactions = self.bandit.user_history[user_id][-10:]  # Last 10 interactions
-            interaction_features = [
-                len(recent_interactions) / 10.0,
-                sum(1 for i in recent_interactions if i['action'] == 'borrow') / 10.0,
-                sum(1 for i in recent_interactions if i['action'] == 'view') / 10.0,
-                np.mean([i.get('dwell_time', 0) for i in recent_interactions]) / 300.0,  # Normalized
-            ]
-        else:
-            interaction_features = [0.0, 0.0, 0.0, 0.0]
-        features.extend(interaction_features)
+        # Add user history embeddings as features
+        history_embeddings = self.compute_user_history_embeddings(user_context)
+        features.extend(history_embeddings.tolist())
         
         # Pad or truncate to feature dimension
         feature_vector = np.array(features)
@@ -1242,6 +1220,112 @@ class BookRecommenderBandit:
             feature_vector = feature_vector[:self.bandit.config.feature_dim]
         
         return feature_vector
+    
+    def compute_user_history_embeddings(self, user_context: Dict[str, Any]) -> np.ndarray:
+        """
+        Compute weighted user history embeddings from both collaborative and content models.
+        
+        Args:
+            user_context: User context containing user_id
+            
+        Returns:
+            Combined history embedding vector (collaborative + content dimensions)
+        """
+        user_id = user_context.get('user_id', 'unknown')
+        
+        # Get user history from bandit
+        if user_id not in self.bandit.user_history or not self.bandit.user_history[user_id]:
+            # No history - return zero embeddings
+            collaborative_dim = self.bandit.config.collaborative_embedding_dim if hasattr(self.bandit.config, 'collaborative_embedding_dim') else 50
+            content_dim = self.bandit.config.content_embedding_dim if hasattr(self.bandit.config, 'content_embedding_dim') else 60
+            return np.zeros(collaborative_dim + content_dim)
+        
+        # Use the same logic as recommendation engine for computing history embeddings
+        user_history = self.bandit.user_history[user_id][-20:]  # Last 20 interactions
+        
+        # Compute collaborative embedding from history
+        collaborative_embedding = self._compute_history_embedding_from_cache(
+            user_history, 'collaborative'
+        )
+        
+        # Compute content embedding from history
+        content_embedding = self._compute_history_embedding_from_cache(
+            user_history, 'content'
+        )
+        
+        # Combine embeddings
+        combined_embedding = np.concatenate([collaborative_embedding, content_embedding])
+        
+        return combined_embedding
+    
+    def _compute_history_embedding_from_cache(self, user_history: List[Dict[str, Any]], 
+                                            embedding_type: str) -> np.ndarray:
+        """
+        Compute weighted user embedding from interaction history using cached embeddings.
+        
+        Args:
+            user_history: User's interaction history
+            embedding_type: 'collaborative' or 'content'
+            
+        Returns:
+            Weighted user embedding vector
+        """
+        # This mirrors the logic from recommendation_engine but using bandit's cached embeddings
+        default_dim = 50 if embedding_type == 'collaborative' else 60
+        
+        # Check if we have embedding caches (this would need to be set up)
+        if not hasattr(self.bandit, 'collaborative_embeddings') or not hasattr(self.bandit, 'content_embeddings'):
+            return np.zeros(default_dim)
+        
+        embeddings_cache = (self.bandit.collaborative_embeddings if embedding_type == 'collaborative' 
+                           else self.bandit.content_embeddings)
+        
+        if not user_history or not embeddings_cache:
+            return np.zeros(default_dim)
+        
+        weighted_embeddings = []
+        weights = []
+        current_time = datetime.now()
+        
+        for interaction in user_history:
+            book_id = interaction['book_id']
+            action = interaction['action']
+            timestamp = interaction.get('timestamp', current_time)
+            
+            # Skip if book not in embeddings
+            if book_id not in embeddings_cache:
+                continue
+            
+            # Calculate magnitude based on action
+            magnitude = {
+                'borrow': 1.0,
+                'view': 0.5,
+                'click': 0.3
+            }.get(action, 0.1)
+            
+            # Calculate time decay
+            if isinstance(timestamp, str):
+                timestamp = datetime.fromisoformat(timestamp)
+            days_ago = (current_time - timestamp).days
+            time_decay = max(0.1, 1.0 - (days_ago / 365.0))  # Decay over a year
+            
+            # Final weight
+            weight = magnitude * time_decay
+            
+            # Add to weighted embeddings
+            weighted_embeddings.append(embeddings_cache[book_id])
+            weights.append(weight)
+        
+        if not weighted_embeddings:
+            return np.zeros(default_dim)
+        
+        # Compute weighted average
+        weighted_embeddings = np.array(weighted_embeddings)
+        weights = np.array(weights)
+        weights = weights / np.sum(weights)  # Normalize weights
+        
+        user_embedding = np.average(weighted_embeddings, axis=0, weights=weights)
+        return user_embedding
     
     # Encoding functions moved to utils.py - use those instead
     
