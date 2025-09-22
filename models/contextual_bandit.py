@@ -11,7 +11,6 @@ Includes REX-like diversity strategies for improved exploration.
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any, Set
-from dataclasses import dataclass
 import joblib
 import logging
 from datetime import datetime, timedelta
@@ -21,54 +20,10 @@ from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 import random
 
+from config import BanditConfig, DiversityConfig, ArmRefreshmentConfig
+from utils import encode_categorical_feature, encode_library_branch
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class DiversityConfig:
-    """Configuration for diversity and exploration strategies."""
-    use_rex_strategy: bool = True  # Enable REX-like randomized exploration
-    diversity_weight: float = 0.3  # Weight for diversity in final scoring
-    rex_probability: float = 0.2  # Probability of using REX strategy
-    max_diversity_clusters: int = 10  # Maximum number of diversity clusters
-    similarity_threshold: float = 0.8  # Threshold for considering arms similar
-    exploration_bonus_factor: float = 1.5  # Multiplier for exploration bonus
-    diversity_decay_rate: float = 0.95  # Decay rate for diversity scores
-    min_diversity_distance: float = 0.1  # Minimum distance for diversity bonus
-    use_clustering_diversity: bool = True  # Use clustering for diversity
-    use_similarity_penalty: bool = True  # Penalize similar arms
-    use_temporal_diversity: bool = True  # Consider temporal diversity
-    temporal_window_hours: int = 24  # Window for temporal diversity
-    feature_staleness_hours: int = 24  # Hours after which features are considered stale
-    auto_refresh_features: bool = True  # Automatically refresh stale features
-
-
-@dataclass
-class ArmRefreshmentConfig:
-    """Configuration for dynamic arm management."""
-    min_confidence_threshold: float = 0.3  # Minimum confidence to trigger refreshment
-    max_exposure_count: int = 100  # Maximum times an arm can be shown before refreshment
-    cooldown_period_hours: int = 24  # Hours before a refreshed arm can be re-selected
-    max_active_arms: int = 1000  # Maximum number of active arms to keep in memory
-    refreshment_batch_size: int = 50  # Number of new arms to add during refreshment
-    confidence_decay_factor: float = 0.95  # Decay factor for confidence over time
-    exposure_decay_hours: int = 168  # Hours after which exposure count decays (1 week)
-
-
-@dataclass
-class BanditConfig:
-    """Configuration for the contextual bandit model."""
-    alpha: float = 1.0  # Exploration parameter
-    feature_dim: int = 50  # Feature dimension
-    regularization: float = 1.0  # L2 regularization
-    exploration_rate: float = 0.1  # Epsilon for exploration
-    decay_rate: float = 0.99  # Reward decay rate
-    min_observations: int = 10  # Minimum observations before exploitation
-    global_weight_decay: float = 0.999  # Decay rate for global weights
-    global_learning_rate: float = 0.01  # Learning rate for global weights
-    use_global_weights: bool = True  # Whether to use global weights
-    arm_refreshment: ArmRefreshmentConfig = None  # Arm refreshment configuration
-    diversity: DiversityConfig = None  # Diversity and exploration configuration
 
 
 class ContextualBandit:
@@ -128,7 +83,7 @@ class ContextualBandit:
         self.session_features = {}
         self.user_history = {}
         
-        logger.info(f"Initialized Contextual Bandit with config: {config}")
+        logger.info(f"Initialised Contextual Bandit with config: {config}")
     
     def add_arm(self, arm_id: str, initial_features: np.ndarray = None):
         """Add a new book (arm) to the bandit."""
@@ -271,7 +226,7 @@ class ContextualBandit:
                 # Compute cosine similarity
                 similarity = cosine_similarity([context_features], [arm_features])[0][0]
                 similarities[arm_id] = similarity
-            else:
+        else:
                 similarities[arm_id] = 0.0
         
         return similarities
@@ -740,205 +695,9 @@ class ContextualBandit:
                 decay_factor = 0.5  # Reduce exposure count by half
                 self.arm_exposure_count[arm_id] = int(self.arm_exposure_count[arm_id] * decay_factor)
     
-    def extract_features(self, user_context: Dict[str, Any], session_context: Dict[str, Any], 
-                        book_features: Dict[str, Any]) -> np.ndarray:
-        """
-        Extract and combine features from user, session, and book context.
-        
-        Args:
-            user_context: User demographics, preferences, history
-            session_context: Current session information
-            book_features: Book-specific features
-            
-        Returns:
-            Combined feature vector
-        """
-        features = []
-        
-        # User features (normalized)
-        user_features = [
-            user_context.get('age', 25) / 100.0,  # Normalized age
-            user_context.get('preference_fiction', 0.5),
-            user_context.get('preference_nonfiction', 0.5),
-            user_context.get('preference_mystery', 0.5),
-            user_context.get('preference_romance', 0.5),
-            user_context.get('preference_scifi', 0.5),
-            user_context.get('avg_reading_time', 30) / 120.0,  # Normalized reading time
-            user_context.get('borrow_frequency', 2) / 10.0,  # Normalized frequency
-        ]
-        features.extend(user_features)
-        
-        # Categorical user features
-        # Gender encoding (one-hot)
-        gender = user_context.get('gender', 'unknown')
-        gender_features = {
-            'male': [1, 0, 0],
-            'female': [0, 1, 0],
-            'other': [0, 0, 1],
-            'unknown': [0, 0, 0]
-        }
-        features.extend(gender_features.get(gender, [0, 0, 0]))
-        
-        # Postcode encoding (geographic clustering)
-        postcode = user_context.get('postcode', 'unknown')
-        postcode_features = self._encode_postcode(postcode)
-        features.extend(postcode_features)
-        
-        # Education level (categorical)
-        education_level = user_context.get('education_level', 'unknown')
-        education_categories = ['high_school', 'bachelor', 'master', 'phd', 'other']
-        education_features = self._encode_categorical_feature(education_level, education_categories)
-        features.extend(education_features)
-        
-        # Occupation category (categorical)
-        occupation = user_context.get('occupation_category', 'unknown')
-        occupation_categories = ['student', 'professional', 'retired', 'unemployed', 'other']
-        occupation_features = self._encode_categorical_feature(occupation, occupation_categories)
-        features.extend(occupation_features)
-        
-        # Session features
-        time_of_day = session_context.get('time_of_day', 'afternoon')
-        time_features = {
-            'morning': [1, 0, 0, 0],
-            'afternoon': [0, 1, 0, 0],
-            'evening': [0, 0, 1, 0],
-            'night': [0, 0, 0, 1]
-        }
-        features.extend(time_features.get(time_of_day, [0, 0, 0, 0]))
-        
-        device = session_context.get('device', 'desktop')
-        device_features = {
-            'mobile': [1, 0, 0],
-            'tablet': [0, 1, 0],
-            'desktop': [0, 0, 1]
-        }
-        features.extend(device_features.get(device, [0, 0, 0]))
-        
-        # Session duration (normalized)
-        session_duration = session_context.get('duration_minutes', 15) / 60.0
-        features.append(session_duration)
-        
-        # Book features
-        book_features_list = [
-            book_features.get('popularity_score', 0.5),
-            book_features.get('availability', 1.0),
-            book_features.get('rating', 3.5) / 5.0,
-            book_features.get('page_count', 300) / 1000.0,  # Normalized
-            book_features.get('publication_year', 2010) / 2024.0,  # Normalized
-        ]
-        features.extend(book_features_list)
-        
-        # Genre features (one-hot encoding)
-        genres = ['fiction', 'nonfiction', 'mystery', 'romance', 'scifi', 'biography', 'history']
-        book_genre = book_features.get('genre', 'fiction')
-        genre_features = [1.0 if genre == book_genre else 0.0 for genre in genres]
-        features.extend(genre_features)
-        
-        # Interaction history features
-        user_id = user_context.get('user_id', 'unknown')
-        if user_id in self.user_history:
-            recent_interactions = self.user_history[user_id][-10:]  # Last 10 interactions
-            interaction_features = [
-                len(recent_interactions) / 10.0,
-                sum(1 for i in recent_interactions if i['action'] == 'borrow') / 10.0,
-                sum(1 for i in recent_interactions if i['action'] == 'view') / 10.0,
-                np.mean([i.get('dwell_time', 0) for i in recent_interactions]) / 300.0,  # Normalized
-            ]
-        else:
-            interaction_features = [0.0, 0.0, 0.0, 0.0]
-        features.extend(interaction_features)
-        
-        # Pad or truncate to feature dimension
-        feature_vector = np.array(features)
-        if len(feature_vector) < self.config.feature_dim:
-            feature_vector = np.pad(feature_vector, (0, self.config.feature_dim - len(feature_vector)))
-        else:
-            feature_vector = feature_vector[:self.config.feature_dim]
-        
-        return feature_vector
+    # Feature extraction moved to BookRecommenderBandit class
     
-    def _encode_postcode(self, postcode: str) -> List[float]:
-        """
-        Encode postcode into feature vector using geographic clustering.
-        
-        Args:
-            postcode: Postcode string
-            
-        Returns:
-            Feature vector representing geographic location
-        """
-        if postcode == 'unknown' or not postcode:
-            return [0.0, 0.0, 0.0, 0.0, 0.0]  # Default features for unknown postcode
-        
-        # Extract first part of postcode (area code)
-        area_code = postcode.split()[0] if ' ' in postcode else postcode[:2]
-        
-        # Geographic region encoding (UK postcode example)
-        # You can customize this based on your geographic data
-        region_features = {
-            # London areas
-            'E': [1, 0, 0, 0, 0],  # East London
-            'W': [1, 0, 0, 0, 0],  # West London
-            'N': [1, 0, 0, 0, 0],  # North London
-            'S': [1, 0, 0, 0, 0],  # South London
-            'SW': [1, 0, 0, 0, 0], # Southwest London
-            'SE': [1, 0, 0, 0, 0], # Southeast London
-            'NW': [1, 0, 0, 0, 0], # Northwest London
-            'NE': [1, 0, 0, 0, 0], # Northeast London
-            'EC': [1, 0, 0, 0, 0], # East Central London
-            'WC': [1, 0, 0, 0, 0], # West Central London
-            
-            # Major cities
-            'M': [0, 1, 0, 0, 0],  # Manchester
-            'B': [0, 1, 0, 0, 0],  # Birmingham
-            'L': [0, 1, 0, 0, 0],  # Liverpool
-            'S': [0, 1, 0, 0, 0],  # Sheffield
-            'LS': [0, 1, 0, 0, 0], # Leeds
-            
-            # Scotland
-            'G': [0, 0, 1, 0, 0],  # Glasgow
-            'EH': [0, 0, 1, 0, 0], # Edinburgh
-            'AB': [0, 0, 1, 0, 0], # Aberdeen
-            'DD': [0, 0, 1, 0, 0], # Dundee
-            
-            # Wales
-            'CF': [0, 0, 0, 1, 0], # Cardiff
-            'SA': [0, 0, 0, 1, 0], # Swansea
-            'LL': [0, 0, 0, 1, 0], # Llandudno
-            
-            # Northern Ireland
-            'BT': [0, 0, 0, 0, 1], # Belfast
-        }
-        
-        # Try to match the area code
-        for code, features in region_features.items():
-            if area_code.upper().startswith(code):
-                return features
-        
-        # If no match found, use a default encoding
-        return [0.0, 0.0, 0.0, 0.0, 0.0]
-    
-    def _encode_categorical_feature(self, value: str, categories: List[str], 
-                                   unknown_value: str = 'unknown') -> List[float]:
-        """
-        Generic method to encode categorical features using one-hot encoding.
-        
-        Args:
-            value: The categorical value to encode
-            categories: List of possible categories
-            unknown_value: Value to use for unknown/missing data
-            
-        Returns:
-            One-hot encoded feature vector
-        """
-        if value == unknown_value or value not in categories:
-            return [0.0] * len(categories)
-        
-        features = [0.0] * len(categories)
-        if value in categories:
-            features[categories.index(value)] = 1.0
-        
-        return features
+    # Feature encoding methods moved to BookRecommenderBandit class
     
     def select_arm(self, user_context: Dict[str, Any], session_context: Dict[str, Any], 
                    available_books: List[str], n_recommendations: int = 5) -> List[Tuple[str, float]]:
@@ -982,11 +741,11 @@ class ContextualBandit:
             self._refresh_stale_features(active_available_books, user_context, session_context)
         
         for arm_id in active_available_books:
-            # Get current features for this specific book
-            book_features = self.arms[arm_id]['features']
+            # Get the arm's stored features (these are the combined user/session/book features)
+            arm_features = self.arms[arm_id]['features']
             
-            # Extract context features (this combines user, session, and book features)
-            context_features = self.extract_features(user_context, session_context, book_features)
+            # Use the stored features directly (they should already be the combined context features)
+            context_features = arm_features
             
             # Calculate UCB score using both individual and global weights
             if self.arm_counts[arm_id] < self.config.min_observations:
@@ -1000,7 +759,7 @@ class ContextualBandit:
                     score = global_score + exploration_bonus
                 else:
                     # Random selection if no global weights available
-                    score = np.random.random()
+                score = np.random.random()
             else:
                 # Exploitation with confidence bounds using individual weights
                 A_inv = np.linalg.inv(self.A[arm_id])
@@ -1054,9 +813,9 @@ class ContextualBandit:
             selected_arms = self._rex_selection(arm_scores, n_recommendations)
         else:
             # Standard selection with epsilon-greedy exploration
-            if np.random.random() < self.config.exploration_rate:
-                # Randomly shuffle top recommendations
-                np.random.shuffle(arm_scores[:n_recommendations])
+        if np.random.random() < self.config.exploration_rate:
+            # Randomly shuffle top recommendations
+            np.random.shuffle(arm_scores[:n_recommendations])
             selected_arms = arm_scores[:n_recommendations]
         
         # Update tracking
@@ -1335,12 +1094,23 @@ class BookRecommenderBandit:
         self.book_metadata = {}  # Book metadata cache
         self.session_manager = SessionManager()
         
-    def add_book(self, book_id: str, metadata: Dict[str, Any]):
+    def add_book(self, book_id: str, metadata: Dict[str, Any], user_context: Dict[str, Any] = None, 
+                 session_context: Dict[str, Any] = None):
         """Add a book with its metadata."""
         self.book_metadata[book_id] = metadata
         
-        # Extract features from metadata
-        features = self._extract_book_features(metadata)
+        # If user and session context are provided, extract full features
+        if user_context is not None and session_context is not None:
+            features = self.extract_features(user_context, session_context, metadata)
+        else:
+            # Fallback: create basic features from metadata only
+        features = np.zeros(self.bandit.config.feature_dim)
+        features[0] = metadata.get('popularity_score', 0.5)
+        features[1] = metadata.get('availability', 1.0)
+        features[2] = metadata.get('rating', 3.5) / 5.0
+        features[3] = metadata.get('page_count', 300) / 1000.0
+        features[4] = metadata.get('publication_year', 2010) / 2024.0
+        
         self.bandit.add_arm(book_id, features)
     
     def update_book_metadata(self, book_id: str, updated_metadata: Dict[str, Any]):
@@ -1373,18 +1143,107 @@ class BookRecommenderBandit:
         """Add books to the candidate pool for potential refreshment."""
         self.bandit.add_candidate_pool(book_ids)
     
-    def _extract_book_features(self, metadata: Dict[str, Any]) -> np.ndarray:
-        """Extract features from book metadata."""
-        features = np.zeros(self.bandit.config.feature_dim)
+    def extract_features(self, user_context: Dict[str, Any], session_context: Dict[str, Any], 
+                        book_features: Dict[str, Any]) -> np.ndarray:
+        """
+        Extract and combine features from user, session, and book context.
         
-        # Basic book features
-        features[0] = metadata.get('popularity_score', 0.5)
-        features[1] = metadata.get('availability', 1.0)
-        features[2] = metadata.get('rating', 3.5) / 5.0
-        features[3] = metadata.get('page_count', 300) / 1000.0
-        features[4] = metadata.get('publication_year', 2010) / 2024.0
+        Args:
+            user_context: User demographics, preferences, history
+            session_context: Current session information
+            book_features: Book-specific features
+            
+        Returns:
+            Combined feature vector
+        """
+        features = []
         
-        return features
+        # User features (normalized)
+        user_features = [
+            user_context.get('age', 25) / 100.0,  # Normalized age
+            user_context.get('preference_fiction', 0.5),
+            user_context.get('preference_nonfiction', 0.5),
+            user_context.get('preference_mystery', 0.5),
+            user_context.get('preference_romance', 0.5),
+            user_context.get('preference_scifi', 0.5),
+            user_context.get('avg_reading_time', 30) / 120.0,  # Normalized reading time
+            user_context.get('borrow_frequency', 2) / 10.0,  # Normalized frequency
+        ]
+        features.extend(user_features)
+        
+        # Categorical user features using utility functions
+        # Gender encoding
+        gender = user_context.get('gender', 'unknown')
+        gender_features = encode_categorical_feature(gender, 'gender')
+        features.extend(gender_features)
+        
+        # Library branch encoding (replaces postcode)
+        library_branch = user_context.get('library_branch', 'unknown')
+        branch_features = encode_library_branch(library_branch)
+        features.extend(branch_features)
+        
+        # Education level
+        education_level = user_context.get('education_level', 'unknown')
+        education_features = encode_categorical_feature(education_level, 'education_level')
+        features.extend(education_features)
+        
+        # Occupation category
+        occupation = user_context.get('occupation_category', 'unknown')
+        occupation_features = encode_categorical_feature(occupation, 'occupation_category')
+        features.extend(occupation_features)
+        
+        # Session features using utility functions
+        time_of_day = session_context.get('time_of_day', 'afternoon')
+        time_features = encode_categorical_feature(time_of_day, 'time_of_day')
+        features.extend(time_features)
+        
+        device = session_context.get('device', 'desktop')
+        device_features = encode_categorical_feature(device, 'device')
+        features.extend(device_features)
+        
+        # Session duration (normalized)
+        session_duration = session_context.get('duration_minutes', 15) / 60.0
+        features.append(session_duration)
+        
+        # Book features
+        book_features_list = [
+            book_features.get('popularity_score', 0.5),
+            book_features.get('availability', 1.0),
+            book_features.get('rating', 3.5) / 5.0,
+            book_features.get('page_count', 300) / 1000.0,  # Normalized
+            book_features.get('publication_year', 2010) / 2024.0,  # Normalized
+        ]
+        features.extend(book_features_list)
+        
+        # Genre features using utility functions
+        book_genre = book_features.get('genre', 'fiction')
+        genre_features = encode_categorical_feature(book_genre, 'genre')
+        features.extend(genre_features)
+        
+        # Interaction history features
+        user_id = user_context.get('user_id', 'unknown')
+        if user_id in self.bandit.user_history:
+            recent_interactions = self.bandit.user_history[user_id][-10:]  # Last 10 interactions
+            interaction_features = [
+                len(recent_interactions) / 10.0,
+                sum(1 for i in recent_interactions if i['action'] == 'borrow') / 10.0,
+                sum(1 for i in recent_interactions if i['action'] == 'view') / 10.0,
+                np.mean([i.get('dwell_time', 0) for i in recent_interactions]) / 300.0,  # Normalized
+            ]
+        else:
+            interaction_features = [0.0, 0.0, 0.0, 0.0]
+        features.extend(interaction_features)
+        
+        # Pad or truncate to feature dimension
+        feature_vector = np.array(features)
+        if len(feature_vector) < self.bandit.config.feature_dim:
+            feature_vector = np.pad(feature_vector, (0, self.bandit.config.feature_dim - len(feature_vector)))
+        else:
+            feature_vector = feature_vector[:self.bandit.config.feature_dim]
+        
+        return feature_vector
+    
+    # Encoding functions moved to utils.py - use those instead
     
     def get_recommendations(self, user_id: str, session_id: str, 
                           user_context: Dict[str, Any], n_recommendations: int = 5) -> List[Dict[str, Any]]:
@@ -1394,6 +1253,16 @@ class BookRecommenderBandit:
         
         # Get available books
         available_books = list(self.book_metadata.keys())
+        
+        # Prepare features for each book and update the bandit
+        for book_id in available_books:
+            if book_id in self.book_metadata:
+                # Extract fresh features for this book
+                book_features = self.book_metadata[book_id]
+                combined_features = self.extract_features(user_context, session, book_features)
+                
+                # Update the bandit's feature cache
+                self.bandit.update_arm_features(book_id, combined_features)
         
         # Get recommendations from bandit
         recommendations = self.bandit.select_arm(
@@ -1485,4 +1354,4 @@ class SessionManager:
         elif 17 <= hour < 22:
             return 'evening'
         else:
-            return 'night'
+            return 'night' 
